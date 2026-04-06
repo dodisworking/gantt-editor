@@ -1,3 +1,4 @@
+// gantt-editor v2 — with auth + persistence
 import { createServer } from 'http'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs'
 import { join, extname } from 'path'
