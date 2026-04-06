@@ -9,8 +9,32 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
 </head>
 <body>
+
+  <!-- Auth Screen -->
+  <div class="auth-screen" id="auth-screen" style="display:none;">
+    <div class="auth-card">
+      <div class="auth-brand">Timeline Editor</div>
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Log In</button>
+        <button class="auth-tab" data-tab="signup">Sign Up</button>
+      </div>
+      <form class="auth-form" id="auth-form" autocomplete="off">
+        <div class="field">
+          <label class="field-label">Username</label>
+          <input type="text" class="field-input auth-input" id="auth-username" placeholder="Enter username" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label class="field-label">Password</label>
+          <input type="password" class="field-input auth-input" id="auth-password" placeholder="Enter password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn-primary auth-submit" id="auth-submit">Log In</button>
+        <div class="auth-error" id="auth-error" style="display:none;"></div>
+      </form>
+    </div>
+  </div>
+
   <!-- Top toolbar -->
-  <header class="toolbar">
+  <header class="toolbar" id="app-toolbar" style="display:none;">
     <div class="toolbar-left">
       <button class="btn-icon" id="btn-charts" title="My Charts">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -46,7 +70,7 @@
         </div>
       </div>
       <div class="zoom-controls">
-        <button class="btn-icon" id="btn-zoom-out" title="Zoom out (−)">
+        <button class="btn-icon" id="btn-zoom-out" title="Zoom out (-)">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
         </button>
         <input type="range" id="zoom-slider" class="zoom-slider" min="20" max="220" value="100" step="10">
@@ -59,17 +83,38 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>
       </button>
       <div class="toolbar-divider"></div>
-      <button class="btn-icon" id="btn-undo" title="Undo (⌘Z)">
+      <button class="btn-icon" id="btn-undo" title="Undo">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
       </button>
-      <button class="btn-icon" id="btn-redo" title="Redo (⌘⇧Z)">
+      <button class="btn-icon" id="btn-redo" title="Redo">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/></svg>
       </button>
+      <div class="toolbar-divider"></div>
+      <!-- User menu -->
+      <div class="dropdown user-menu-dropdown" id="user-menu-dropdown">
+        <button class="user-avatar" id="user-avatar" title="Account"></button>
+        <div class="dropdown-menu user-dropdown-menu">
+          <div class="user-dropdown-header" id="user-dropdown-header"></div>
+          <button class="dropdown-item" id="user-menu-charts">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+            My Charts
+          </button>
+          <button class="dropdown-item" id="user-menu-admin" style="display:none;">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Admin Panel
+          </button>
+          <div class="dropdown-divider"></div>
+          <button class="dropdown-item dropdown-item-danger" id="user-menu-logout">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            Log Out
+          </button>
+        </div>
+      </div>
     </div>
   </header>
 
   <!-- Chart area -->
-  <main class="chart-wrapper" id="chart-wrapper">
+  <main class="chart-wrapper" id="chart-wrapper" style="display:none;">
     <div class="chart-container" id="gantt-chart">
       <!-- Editable header section -->
       <div class="chart-header" id="chart-header">
@@ -247,6 +292,27 @@
           <div class="welcome-card-desc">Load an example chart to explore and customize</div>
         </button>
       </div>
+    </div>
+  </div>
+
+  <!-- Admin Modal -->
+  <div class="modal-overlay" id="admin-modal-overlay"></div>
+  <div class="modal modal-admin" id="admin-modal">
+    <div class="modal-header">
+      <h2 class="modal-title">Admin Panel</h2>
+      <button class="btn-icon modal-close" id="admin-modal-close">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" id="admin-users-list"></div>
+    <div class="admin-user-charts" id="admin-user-charts" style="display:none;">
+      <div class="admin-user-charts-header">
+        <button class="btn-icon" id="admin-back">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <h3 class="admin-user-charts-title" id="admin-user-charts-title"></h3>
+      </div>
+      <div id="admin-user-charts-list"></div>
     </div>
   </div>
 

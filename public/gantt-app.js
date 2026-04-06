@@ -141,36 +141,176 @@ function createSampleChart() {
 }
 
 // ─── App State ───────────────────────────────────────────────────────────────
-const STORAGE_KEY = 'gantt_charts';
-let charts = [];
+let currentUser = null; // { username, role }
+let charts = [];        // in-memory chart summaries from API
 let currentChartId = null;
+let currentChartData = null; // full chart object for the active chart
 let selectedPhaseId = null;
 let undoStack = [];
 let redoStack = [];
 
-// ─── Persistence ─────────────────────────────────────────────────────────────
-function loadCharts() {
+// ─── API Helpers ─────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const resp = await fetch(path, opts);
+  const data = await resp.json();
+  if (!resp.ok) throw { status: resp.status, ...data };
+  return data;
+}
+
+// ─── Auth ────────────────────────────────────────────────────────────────────
+function showAuthScreen() {
+  document.getElementById('auth-screen').style.display = 'flex';
+  document.getElementById('app-toolbar').style.display = 'none';
+  document.getElementById('chart-wrapper').style.display = 'none';
+  document.getElementById('welcome-screen').style.display = 'none';
+}
+
+function hideAuthScreen() {
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app-toolbar').style.display = 'flex';
+  document.getElementById('chart-wrapper').style.display = 'block';
+}
+
+function updateUserMenu() {
+  if (!currentUser) return;
+  const avatar = document.getElementById('user-avatar');
+  avatar.textContent = currentUser.username.charAt(0);
+  const header = document.getElementById('user-dropdown-header');
+  header.textContent = currentUser.username;
+  // Show admin button only for admins
+  document.getElementById('user-menu-admin').style.display =
+    currentUser.role === 'admin' ? 'flex' : 'none';
+}
+
+function initAuthHandlers() {
+  const tabs = document.querySelectorAll('.auth-tab');
+  const submitBtn = document.getElementById('auth-submit');
+  const form = document.getElementById('auth-form');
+  const errorEl = document.getElementById('auth-error');
+  let authMode = 'login'; // or 'signup'
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      authMode = tab.dataset.tab;
+      tabs.forEach(t => t.classList.toggle('active', t === tab));
+      submitBtn.textContent = authMode === 'login' ? 'Log In' : 'Sign Up';
+      errorEl.style.display = 'none';
+    });
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('auth-username').value.trim();
+    const password = document.getElementById('auth-password').value;
+    if (!username || !password) return;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = authMode === 'login' ? 'Logging in...' : 'Signing up...';
+    errorEl.style.display = 'none';
+
+    try {
+      const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/signup';
+      const data = await api('POST', endpoint, { username, password });
+      currentUser = { username: data.username, role: data.role };
+      hideAuthScreen();
+      updateUserMenu();
+      await loadChartsFromServer();
+    } catch (err) {
+      errorEl.textContent = err.error || 'Something went wrong';
+      errorEl.style.display = 'block';
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = authMode === 'login' ? 'Log In' : 'Sign Up';
+    }
+  });
+}
+
+async function handleLogout() {
+  try { await api('POST', '/api/auth/logout'); } catch (e) { /* ignore */ }
+  currentUser = null;
+  charts = [];
+  currentChartId = null;
+  currentChartData = null;
+  undoStack = [];
+  redoStack = [];
+  showAuthScreen();
+  document.getElementById('auth-username').value = '';
+  document.getElementById('auth-password').value = '';
+  document.getElementById('auth-error').style.display = 'none';
+}
+
+// ─── Persistence (Server API) ────────────────────────────────────────────────
+async function loadChartsFromServer() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) charts = JSON.parse(raw);
-  } catch (e) { charts = []; }
-  if (!charts.length) {
-    charts.push(createSampleChart());
+    charts = await api('GET', '/api/charts');
+  } catch (e) {
+    charts = [];
   }
+
+  if (charts.length === 0) {
+    // Show welcome screen for new users
+    showWelcomeScreen();
+    return;
+  }
+
+  // Load the first chart
   currentChartId = charts[0].id;
+  await loadFullChart(currentChartId);
+  renderChart();
 }
 
-function saveCharts() {
+async function loadFullChart(id) {
   try {
-    const c = currentChart();
-    if (c) c.modified = new Date().toISOString();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(charts));
-  } catch (e) { /* quota exceeded */ }
+    currentChartData = await api('GET', `/api/charts/${id}`);
+    currentChartId = id;
+    undoStack = [];
+    redoStack = [];
+    updateUndoButtons();
+  } catch (e) {
+    showToast('Failed to load chart');
+  }
 }
 
-const autoSave = debounce(saveCharts, 400);
+async function saveCurrentChart() {
+  if (!currentChartData || !currentChartId) return;
+  currentChartData.modified = new Date().toISOString();
+  try {
+    await api('PUT', `/api/charts/${currentChartId}`, currentChartData);
+  } catch (e) {
+    // silent fail on autosave
+  }
+}
 
-function currentChart() { return charts.find(c => c.id === currentChartId); }
+const autoSave = debounce(saveCurrentChart, 400);
+
+async function createChartOnServer(chartObj) {
+  try {
+    const result = await api('POST', '/api/charts', chartObj);
+    chartObj.id = result.id;
+    return chartObj;
+  } catch (e) {
+    showToast('Failed to create chart');
+    return null;
+  }
+}
+
+async function deleteChartOnServer(id) {
+  try {
+    await api('DELETE', `/api/charts/${id}`);
+    return true;
+  } catch (e) {
+    showToast('Failed to delete chart');
+    return false;
+  }
+}
+
+function currentChart() { return currentChartData; }
 
 // ─── Undo / Redo ─────────────────────────────────────────────────────────────
 function pushUndo() {
@@ -188,6 +328,7 @@ function undo() {
   redoStack.push(JSON.stringify(c));
   const prev = JSON.parse(undoStack.pop());
   Object.assign(c, prev);
+  currentChartData = c;
   selectedPhaseId = null;
   closePanel();
   renderChart();
@@ -201,6 +342,7 @@ function redo() {
   undoStack.push(JSON.stringify(c));
   const next = JSON.parse(redoStack.pop());
   Object.assign(c, next);
+  currentChartData = c;
   selectedPhaseId = null;
   closePanel();
   renderChart();
@@ -951,7 +1093,16 @@ function initToolbarHandlers() {
     exportDropdown.classList.toggle('open');
   });
 
-  document.addEventListener('click', () => exportDropdown.classList.remove('open'));
+  document.addEventListener('click', (e) => {
+    // Close export dropdown
+    if (!e.target.closest('#export-dropdown')) {
+      exportDropdown.classList.remove('open');
+    }
+    // Close user menu dropdown
+    if (!e.target.closest('#user-menu-dropdown')) {
+      document.getElementById('user-menu-dropdown').classList.remove('open');
+    }
+  });
 
   document.getElementById('export-png').addEventListener('click', () => exportPNG());
   document.getElementById('export-pdf').addEventListener('click', () => exportPDF());
@@ -964,20 +1115,43 @@ function initToolbarHandlers() {
   document.getElementById('btn-charts').addEventListener('click', openChartsModal);
   document.getElementById('modal-close').addEventListener('click', closeChartsModal);
   document.getElementById('modal-overlay').addEventListener('click', closeChartsModal);
-  document.getElementById('btn-new-chart').addEventListener('click', () => {
+  document.getElementById('btn-new-chart').addEventListener('click', async () => {
     const newChart = createSampleChart();
     newChart.title = 'New Timeline';
     newChart.note = '';
     newChart.phases = [];
     newChart.dateRange = { start: fmtDate(new Date()), end: fmtDate(addDays(new Date(), 56)) };
-    charts.push(newChart);
-    currentChartId = newChart.id;
-    undoStack = [];
-    redoStack = [];
-    updateUndoButtons();
-    closeChartsModal();
-    renderChart();
-    autoSave();
+    const created = await createChartOnServer(newChart);
+    if (created) {
+      currentChartData = created;
+      currentChartId = created.id;
+      undoStack = [];
+      redoStack = [];
+      updateUndoButtons();
+      closeChartsModal();
+      renderChart();
+    }
+  });
+
+  // User menu
+  document.getElementById('user-avatar').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('user-menu-dropdown').classList.toggle('open');
+  });
+
+  document.getElementById('user-menu-charts').addEventListener('click', () => {
+    document.getElementById('user-menu-dropdown').classList.remove('open');
+    openChartsModal();
+  });
+
+  document.getElementById('user-menu-admin').addEventListener('click', () => {
+    document.getElementById('user-menu-dropdown').classList.remove('open');
+    openAdminModal();
+  });
+
+  document.getElementById('user-menu-logout').addEventListener('click', () => {
+    document.getElementById('user-menu-dropdown').classList.remove('open');
+    handleLogout();
   });
 
   // Keyboard shortcuts
@@ -991,6 +1165,7 @@ function initToolbarHandlers() {
       closeChartsModal();
       closeNoteModal();
       closeAiModal();
+      closeAdminModal();
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (selectedPhaseId && document.activeElement === document.body) {
@@ -1007,7 +1182,12 @@ function closeNoteModal() {
 }
 
 // ─── Charts Modal ────────────────────────────────────────────────────────────
-function openChartsModal() {
+async function openChartsModal() {
+  // Refresh chart list from server
+  try {
+    charts = await api('GET', '/api/charts');
+  } catch (e) { /* keep existing */ }
+
   const list = document.getElementById('charts-list');
   list.innerHTML = '';
 
@@ -1026,8 +1206,8 @@ function openChartsModal() {
           </svg>
         </div>
         <div class="chart-item-info">
-          <div class="chart-item-title">${c.title}</div>
-          <div class="chart-item-meta">${c.phases.length} phases &middot; Modified ${new Date(c.modified).toLocaleDateString()}</div>
+          <div class="chart-item-title">${escapeHtml(c.title)}</div>
+          <div class="chart-item-meta">${c.phaseCount} phases &middot; Modified ${new Date(c.modified).toLocaleDateString()}</div>
         </div>
         <div class="chart-item-actions">
           <button class="chart-item-btn duplicate" title="Duplicate">
@@ -1043,12 +1223,9 @@ function openChartsModal() {
         </div>`;
 
       // Select chart
-      item.addEventListener('click', (e) => {
+      item.addEventListener('click', async (e) => {
         if (e.target.closest('.chart-item-btn')) return;
-        currentChartId = c.id;
-        undoStack = [];
-        redoStack = [];
-        updateUndoButtons();
+        await loadFullChart(c.id);
         selectedPhaseId = null;
         closePanel();
         closeChartsModal();
@@ -1056,36 +1233,43 @@ function openChartsModal() {
       });
 
       // Duplicate
-      item.querySelector('.duplicate').addEventListener('click', (e) => {
+      item.querySelector('.duplicate').addEventListener('click', async (e) => {
         e.stopPropagation();
-        const dup = JSON.parse(JSON.stringify(c));
-        dup.id = uid();
-        dup.title = c.title + ' (Copy)';
-        dup.created = new Date().toISOString();
-        dup.modified = new Date().toISOString();
-        dup.phases.forEach(p => p.id = uid());
-        charts.push(dup);
-        saveCharts();
-        openChartsModal(); // refresh list
+        // Load the full chart to duplicate
+        try {
+          const fullChart = await api('GET', `/api/charts/${c.id}`);
+          const dup = JSON.parse(JSON.stringify(fullChart));
+          dup.id = uid();
+          dup.title = c.title + ' (Copy)';
+          dup.created = new Date().toISOString();
+          dup.modified = new Date().toISOString();
+          dup.phases.forEach(p => p.id = uid());
+          await createChartOnServer(dup);
+          openChartsModal(); // refresh list
+        } catch (err) {
+          showToast('Failed to duplicate chart');
+        }
       });
 
       // Delete
-      item.querySelector('.delete').addEventListener('click', (e) => {
+      item.querySelector('.delete').addEventListener('click', async (e) => {
         e.stopPropagation();
         if (charts.length <= 1) {
           showToast('Cannot delete the last chart');
           return;
         }
-        charts = charts.filter(ch => ch.id !== c.id);
-        if (currentChartId === c.id) {
-          currentChartId = charts[0].id;
-          undoStack = [];
-          redoStack = [];
-          updateUndoButtons();
-          renderChart();
+        const deleted = await deleteChartOnServer(c.id);
+        if (deleted) {
+          if (currentChartId === c.id) {
+            // Load a different chart
+            charts = charts.filter(ch => ch.id !== c.id);
+            if (charts.length) {
+              await loadFullChart(charts[0].id);
+              renderChart();
+            }
+          }
+          openChartsModal(); // refresh list
         }
-        saveCharts();
-        openChartsModal(); // refresh list
       });
 
       list.appendChild(item);
@@ -1099,6 +1283,133 @@ function openChartsModal() {
 function closeChartsModal() {
   document.getElementById('modal-overlay').classList.remove('visible');
   document.getElementById('charts-modal').classList.remove('visible');
+}
+
+// ─── Admin Modal ─────────────────────────────────────────────────────────────
+async function openAdminModal() {
+  if (!currentUser || currentUser.role !== 'admin') return;
+
+  const listEl = document.getElementById('admin-users-list');
+  const chartsPanel = document.getElementById('admin-user-charts');
+  chartsPanel.style.display = 'none';
+  listEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">Loading...</div></div>';
+
+  document.getElementById('admin-modal-overlay').classList.add('visible');
+  document.getElementById('admin-modal').classList.add('visible');
+
+  try {
+    const users = await api('GET', '/api/admin/users');
+    listEl.innerHTML = '';
+
+    users.forEach(u => {
+      const item = document.createElement('div');
+      item.className = 'admin-user-item';
+
+      const avatarColors = ['#3478F6', '#7B61C4', '#E8883C', '#34C759', '#FF2D55', '#5856D6'];
+      const colorIdx = u.username.charCodeAt(0) % avatarColors.length;
+
+      const roleBadgeClass = u.role === 'admin' ? 'role-badge-admin' : 'role-badge-user';
+      const pwId = 'pw-' + u.username;
+
+      item.innerHTML = `
+        <div class="admin-user-avatar" style="background: ${avatarColors[colorIdx]}">${escapeHtml(u.username.charAt(0).toUpperCase())}</div>
+        <div class="admin-user-info">
+          <div class="admin-user-name">
+            ${escapeHtml(u.username)}
+            <span class="role-badge ${roleBadgeClass}">${u.role}</span>
+          </div>
+          <div class="admin-user-meta">${u.chartCount} chart${u.chartCount !== 1 ? 's' : ''} &middot; Joined ${new Date(u.created).toLocaleDateString()}</div>
+        </div>
+        <div class="admin-user-password">
+          <div class="password-field">
+            <span class="password-field-text" id="${pwId}">${'\u2022'.repeat(Math.min(u.password.length, 8))}</span>
+            <button class="password-toggle" data-username="${escapeHtml(u.username)}" data-password="${escapeHtml(u.password)}" data-visible="false" title="Show password">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>`;
+
+      // Click user to see their charts
+      item.addEventListener('click', async (e) => {
+        if (e.target.closest('.password-toggle')) return;
+        await showUserCharts(u.username);
+      });
+
+      // Password toggle
+      const toggleBtn = item.querySelector('.password-toggle');
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const pwEl = item.querySelector('.password-field-text');
+        const isVisible = toggleBtn.dataset.visible === 'true';
+        if (isVisible) {
+          pwEl.textContent = '\u2022'.repeat(Math.min(u.password.length, 8));
+          toggleBtn.dataset.visible = 'false';
+          toggleBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+        } else {
+          pwEl.textContent = u.password;
+          toggleBtn.dataset.visible = 'true';
+          toggleBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+        }
+      });
+
+      listEl.appendChild(item);
+    });
+  } catch (e) {
+    listEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">Failed to load users</div></div>';
+  }
+}
+
+async function showUserCharts(username) {
+  const listEl = document.getElementById('admin-users-list');
+  const chartsPanel = document.getElementById('admin-user-charts');
+  const chartsList = document.getElementById('admin-user-charts-list');
+
+  document.getElementById('admin-user-charts-title').textContent = `${username}'s Charts`;
+  chartsList.innerHTML = '<div class="empty-state"><div class="empty-state-text">Loading...</div></div>';
+  listEl.style.display = 'none';
+  chartsPanel.style.display = 'block';
+
+  try {
+    const userCharts = await api('GET', `/api/admin/user-charts/${username}`);
+    chartsList.innerHTML = '';
+
+    if (!userCharts.length) {
+      chartsList.innerHTML = '<div class="empty-state"><div class="empty-state-text">No charts</div></div>';
+    } else {
+      userCharts.forEach(c => {
+        const item = document.createElement('div');
+        item.className = 'admin-chart-item';
+        item.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--text-tertiary); flex-shrink:0;">
+            <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+            <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+          </svg>
+          <div class="admin-chart-info">
+            <div class="admin-chart-title">${escapeHtml(c.title)}</div>
+            <div class="admin-chart-meta">${c.phaseCount} phases &middot; ${new Date(c.modified).toLocaleDateString()}</div>
+          </div>`;
+        chartsList.appendChild(item);
+      });
+    }
+  } catch (e) {
+    chartsList.innerHTML = '<div class="empty-state"><div class="empty-state-text">Failed to load charts</div></div>';
+  }
+
+  // Back button
+  document.getElementById('admin-back').onclick = () => {
+    chartsPanel.style.display = 'none';
+    listEl.style.display = 'block';
+  };
+}
+
+function closeAdminModal() {
+  document.getElementById('admin-modal-overlay').classList.remove('visible');
+  document.getElementById('admin-modal').classList.remove('visible');
+}
+
+function initAdminHandlers() {
+  document.getElementById('admin-modal-close').addEventListener('click', closeAdminModal);
+  document.getElementById('admin-modal-overlay').addEventListener('click', closeAdminModal);
 }
 
 // ─── Export ──────────────────────────────────────────────────────────────────
@@ -1209,6 +1520,13 @@ function showToast(msg) {
   toastTimeout = setTimeout(() => toast.classList.remove('visible'), 2500);
 }
 
+// ─── HTML Escape ─────────────────────────────────────────────────────────────
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 // ─── AI Generate ─────────────────────────────────────────────────────────────
 function initAiHandlers() {
   const promptInput = document.getElementById('ai-prompt');
@@ -1261,6 +1579,7 @@ function initAiHandlers() {
       const resp = await fetch('/api/gantt/ai-generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({ prompt })
       });
 
@@ -1324,68 +1643,95 @@ function closeAiModal() {
   document.getElementById('ai-modal').classList.remove('visible');
 }
 
-// ─── Init ────────────────────────────────────────────────────────────────────
+// ─── Welcome Screen ──────────────────────────────────────────────────────────
+function showWelcomeScreen() {
+  hideAuthScreen();
+  document.getElementById('welcome-screen').style.display = 'flex';
+}
+
 function initWelcome() {
-  const WELCOME_KEY = 'gantt_welcome_seen';
   const welcomeScreen = document.getElementById('welcome-screen');
 
-  // Only show if user hasn't seen it before
-  if (localStorage.getItem(WELCOME_KEY)) return;
-
-  welcomeScreen.style.display = 'flex';
-
-  function dismissWelcome() {
-    localStorage.setItem(WELCOME_KEY, '1');
+  async function dismissWelcome() {
     welcomeScreen.classList.add('fade-out');
     setTimeout(() => {
       welcomeScreen.style.display = 'none';
     }, 400);
   }
 
-  // AI Generate - create blank chart then open AI modal
-  document.getElementById('welcome-ai').addEventListener('click', () => {
-    const chart = currentChart();
-    chart.title = 'New Timeline';
-    chart.note = '';
-    chart.phases = [];
-    chart.dateRange = { start: fmtDate(new Date()), end: fmtDate(addDays(new Date(), 56)) };
-    renderChart();
-    autoSave();
-    dismissWelcome();
-    // Open AI modal after a short delay for the transition
-    setTimeout(() => {
-      document.getElementById('btn-ai-generate').click();
-    }, 500);
+  // AI Generate - create blank chart on server then open AI modal
+  document.getElementById('welcome-ai').addEventListener('click', async () => {
+    const newChart = createSampleChart();
+    newChart.title = 'New Timeline';
+    newChart.note = '';
+    newChart.phases = [];
+    newChart.dateRange = { start: fmtDate(new Date()), end: fmtDate(addDays(new Date(), 56)) };
+    const created = await createChartOnServer(newChart);
+    if (created) {
+      currentChartData = created;
+      currentChartId = created.id;
+      renderChart();
+      dismissWelcome();
+      // Open AI modal after a short delay for the transition
+      setTimeout(() => {
+        document.getElementById('btn-ai-generate').click();
+      }, 500);
+    }
   });
 
   // Blank Timeline
-  document.getElementById('welcome-blank').addEventListener('click', () => {
-    const chart = currentChart();
-    chart.title = 'New Timeline';
-    chart.note = '';
-    chart.phases = [];
-    chart.dateRange = { start: fmtDate(new Date()), end: fmtDate(addDays(new Date(), 56)) };
-    renderChart();
-    autoSave();
-    dismissWelcome();
+  document.getElementById('welcome-blank').addEventListener('click', async () => {
+    const newChart = createSampleChart();
+    newChart.title = 'New Timeline';
+    newChart.note = '';
+    newChart.phases = [];
+    newChart.dateRange = { start: fmtDate(new Date()), end: fmtDate(addDays(new Date(), 56)) };
+    const created = await createChartOnServer(newChart);
+    if (created) {
+      currentChartData = created;
+      currentChartId = created.id;
+      renderChart();
+      dismissWelcome();
+    }
   });
 
-  // Sample Template - use the default sample chart (already loaded)
-  document.getElementById('welcome-template').addEventListener('click', () => {
-    dismissWelcome();
+  // Sample Template - create a sample chart on server
+  document.getElementById('welcome-template').addEventListener('click', async () => {
+    const sample = createSampleChart();
+    const created = await createChartOnServer(sample);
+    if (created) {
+      currentChartData = created;
+      currentChartId = created.id;
+      renderChart();
+      dismissWelcome();
+    }
   });
 }
 
-function init() {
-  loadCharts();
-  renderChart();
+// ─── Init ────────────────────────────────────────────────────────────────────
+async function init() {
+  // Initialize all UI handlers first
   initDragHandlers();
   initPanelHandlers();
   initToolbarHandlers();
   initZoomHandlers();
   initAiHandlers();
   initWelcome();
+  initAuthHandlers();
+  initAdminHandlers();
   updateUndoButtons();
+
+  // Check if user is already authenticated
+  try {
+    const user = await api('GET', '/api/auth/me');
+    currentUser = { username: user.username, role: user.role };
+    hideAuthScreen();
+    updateUserMenu();
+    await loadChartsFromServer();
+  } catch (e) {
+    // Not authenticated — show login
+    showAuthScreen();
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);
